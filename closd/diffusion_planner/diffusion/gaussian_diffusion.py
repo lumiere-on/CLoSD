@@ -219,6 +219,7 @@ class GaussianDiffusion:
     #     return mse_loss_val
 
 
+    # forward process(Noise injection)
     def q_mean_variance(self, x_start, t):
         """
         Get the distribution q(x_t | x_0).
@@ -257,6 +258,8 @@ class GaussianDiffusion:
             + _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape)
             * noise
         )
+    
+     #$x_t = \sqrt{\bar{\alpha}_t}x_0 + \sqrt{1-\bar{\alpha}_t}\epsilon$
 
     def q_posterior_mean_variance(self, x_start, x_t, t):
         """
@@ -282,6 +285,9 @@ class GaussianDiffusion:
         )
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
+
+    # Reverse Process(Denoising & Sampling)
+    # 현재 상태  x_t에서 이전 상태 x_{t-1}를 예측
     def p_mean_variance(
         self, model, x, t, clip_denoised=True, denoised_fn=None, model_kwargs=None,
         cond_fn=None, recon_guidance=False,
@@ -355,11 +361,23 @@ class GaussianDiffusion:
             # t1 = time.time() 
             # print('=== MDM call [{:.1f}] ms'.format((t1-t0)*1e3))
         
-        
+        # 마스크가 채워진 부분은 정답 데이터로 채우고, 나머지는 모델이 생성한 걸로 써라. 
+        # 딕셔너리 내부의 키가 존재하는지 확인. 
         if 'inpainting_mask' in model_kwargs['y'].keys() and 'inpainted_motion' in model_kwargs['y'].keys():
+
+            # 딕셔너리에서 마스크(어디를 고정할지)와 정답 동작(채워넣을 값)을 꺼냄.
             inpainting_mask, inpainted_motion = model_kwargs['y']['inpainting_mask'], model_kwargs['y']['inpainted_motion']
+
+            #assert 조건식, "err msg": 조건식이 true면 넘어가고, false면 err msg 출력
+            # 2. [검증] 이 기능은 모델이 '노이즈(Epsilon)'가 아니라 '원본 데이터(START_X)'를 예측할 때만 작동합니다.
             assert self.model_mean_type == ModelMeanType.START_X, 'This feature supports only X_start pred for mow!'
+
+            # 3. [검증] 모델의 출력, 마스크, 정답 동작의 데이터 크기(shape)가 모두 똑같은지 확인합니다.
             assert model_output.shape == inpainting_mask.shape == inpainted_motion.shape
+
+            # 4. [핵심 연산]
+            # (모델 예측값 * 마스크의 반대) + (정답 동작 * 마스크)
+            # 즉, 마스크가 True인 곳은 '정답 동작'을 쓰고, False인 곳은 '모델 예측값'을 씀. 
             model_output = (model_output * ~inpainting_mask) + (inpainted_motion * inpainting_mask)
             # print('model_output', model_output.shape, model_output)
             # print('inpainting_mask', inpainting_mask.shape, inpainting_mask[0,0,0,:])
@@ -549,6 +567,7 @@ class GaussianDiffusion:
         )
         return out
 
+    # denoising sample 함수
     def p_sample(
         self,
         model,

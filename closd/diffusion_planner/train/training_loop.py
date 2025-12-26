@@ -470,8 +470,6 @@ class TrainLoop:
                 }
 
             torch.save(opt_state, f)
-
-
 def parse_resume_step_from_filename(filename):
     """
     Parse filenames of the form path/to/modelNNNNNN.pt, where NNNNNN is the
