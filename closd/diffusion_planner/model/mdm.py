@@ -9,8 +9,8 @@ from closd.diffusion_planner.utils.misc import WeightedSum
 normal_repr = torch.Tensor.__repr__
 torch.Tensor.__repr__ = lambda self: f"{self.shape}_{normal_repr(self)}"  # for debug
 
-
-class MDM(nn.Module):
+# Motion Diffusion Model(MDM)
+class MDM(nn.Module): 
     def __init__(self, modeltype, njoints, nfeats, num_actions, translation, pose_rep, glob, glob_rot,
                  latent_dim=256, ff_size=1024, num_layers=8, num_heads=4, dropout=0.1,
                  ablation=None, activation="gelu", legacy=False, data_rep='rot6d', dataset='amass', clip_dim=512,
@@ -68,13 +68,17 @@ class MDM(nn.Module):
         
         self.multi_target_cond = kargs.get('multi_target_cond', False)
         self.multi_encoder_type = kargs.get('multi_encoder_type', 'multi')
+
+        # 목표 지점(target location) 정보를 어케 처리해서 신경망에 주입할지 결정. 
+        # multi_encoder_type에 따라 목표 정보를 해석하는 통역사를 갈아끼움. 
         self.target_enc_layers = kargs.get('target_enc_layers', 1)
+
         if self.multi_target_cond:
-            if self.multi_encoder_type == 'multi':
+            if self.multi_encoder_type == 'multi': # 분업 후 종합
                 self.embed_target_cond = EmbedTargetLocMulti(self.all_goal_joint_names, self.latent_dim)
-            elif self.multi_encoder_type == 'single':
+            elif self.multi_encoder_type == 'single': # 일괄 처리
                self.embed_target_cond = EmbedTargetLocSingle(self.all_goal_joint_names, self.latent_dim, self.target_enc_layers)       
-            elif self.multi_encoder_type == 'split':
+            elif self.multi_encoder_type == 'split': # 분업 후 나열
                self.embed_target_cond = EmbedTargetLocSplit(self.all_goal_joint_names, self.latent_dim, self.target_enc_layers)     
         
         if self.arch == 'trans_enc':
@@ -102,6 +106,7 @@ class MDM(nn.Module):
         else:
             raise ValueError('Please choose correct architecture [trans_enc, trans_dec, gru]')
 
+        # 현재 확산 단계 t를 벡터로 만듦. 
         self.embed_timestep = TimestepEmbedder(self.latent_dim, self.sequence_pos_encoder)
 
         if self.cond_mode != 'no_cond':
@@ -178,14 +183,14 @@ class MDM(nn.Module):
             # print('texts after pad', texts.shape, texts)
         else:
             texts = clip.tokenize(raw_text, truncate=True).to(device) # [bs, context_length] # if n_tokens > 77 -> will truncate
-        return self.clip_model.encode_text(texts).float().unsqueeze(0)
+        return self.clip_model.encode_text(texts).float().unsqueeze(0) #[1, bs, clip_dim]
     
     def bert_encode_text(self, raw_text):
         # enc_text = self.clip_model(raw_text)
         # enc_text = enc_text.permute(1, 0, 2)
         # return enc_text
         enc_text, mask = self.clip_model(raw_text)  # self.clip_model.get_last_hidden_state(raw_text, return_mask=True)  # mask: False means no token there
-        enc_text = enc_text.permute(1, 0, 2)
+        enc_text = enc_text.permute(1, 0, 2) # [seqlen, bs, dim], bs: batch size
         mask = ~mask  # mask: True means no token there, we invert since the meaning of mask for transformer is inverted  https://pytorch.org/docs/stable/generated/torch.nn.MultiheadAttention.html
         return enc_text, mask
 
@@ -249,7 +254,7 @@ class MDM(nn.Module):
 
         x = self.input_process(x)
 
-        # TODO - move to collate
+        # TODO - move to collate(수집.분석)
         frames_mask = None
         is_valid_mask = y['mask'].shape[-1] > 1  # Don't use mask with the generate script
         if self.mask_frames and is_valid_mask:
@@ -331,6 +336,7 @@ class TimestepEmbedder(nn.Module):
 
     def forward(self, timesteps):
         return self.time_embed(self.sequence_pos_encoder.pe[timesteps]).permute(1, 0, 2)
+        # 결과 shape: [1, bs, d]
 
 
 class InputProcess(nn.Module):
@@ -398,7 +404,13 @@ class EmbedAction(nn.Module):
         idx = input[:, 0].to(torch.long)  # an index array must be long
         output = self.action_embedding[idx]
         return output
-    
+
+
+'''
+<일괄 처리>
+- 모든 관절의 목표 좌표를 하나의 긴 데이터로 연결 -> 하나의 거대한 인코더에 집어넣음. 
+- 모든 관절의 목표를 한 번에 봄 -> 관절 간의 관계)를 파악하기 유리. 
+'''  
 class EmbedTargetLocSingle(nn.Module):
     def __init__(self, all_goal_joint_names, latent_dim, num_layers=1):
         super().__init__()
@@ -421,7 +433,11 @@ class EmbedTargetLocSingle(nn.Module):
         mlp_input = torch.cat([input, validity], dim=-1).view(input.shape[0], -1)
         return self.mlp(mlp_input)
 
-
+'''
+<분업 후 나열>
+- 입력은 따로따로 받아서 처리하지만, 결과를 합치지 않고 이어붙여서(concat) 최종 결과 생성. 
+- multi와 비슷하지만 정보를 압축하지 않고 펼쳐서 전달. 
+'''
 class EmbedTargetLocSplit(nn.Module):
     def __init__(self, all_goal_joint_names, latent_dim, num_layers=1):
         super().__init__()
@@ -449,6 +465,11 @@ class EmbedTargetLocSplit(nn.Module):
         mlp_splits = [self.mini_mlps[i](mlp_input[:, i]) for i in range(mlp_input.shape[1])] 
         return torch.cat(mlp_splits, dim=-1)
   
+'''
+<분업 후 종합>
+- 각 관절마다 전용 인코더 있음. 각 인코더가 처리한 뒤 결과 합침. 
+- 관절 특성을 살릴 수 있는 정교한 방식. 
+''' 
 class EmbedTargetLocMulti(nn.Module):
     def __init__(self, all_goal_joint_names, latent_dim):
         super().__init__()
